@@ -128,6 +128,28 @@ export default function cdExtension(pi: ExtensionAPI) {
 			}
 
 			const rememberedPrevious = ctx.cwd;
+
+			// Inject an explicit, in-conversation notice so the LLM knows the cwd
+			// changed. Without this, the forked session inherits history that
+			// references the old cwd and the model keeps reasoning about the old
+			// directory when the user says "this folder".
+			try {
+				newManager.appendCustomMessageEntry(
+					"pi-cd-note",
+					[
+						`[pi-cd] Working directory changed: ${rememberedPrevious} → ${target}`,
+						"",
+						"From this point on, all relative paths, references to \"this folder\", \"the current directory\", \"here\", etc. refer to the NEW directory.",
+						"Earlier turns in this conversation happened in the previous directory; treat those as historical context only — do not assume their paths still apply.",
+					].join("\n"),
+					true,
+				);
+			} catch (err) {
+				// Non-fatal — switch still proceeds, just without the notice.
+				const msg = err instanceof Error ? err.message : String(err);
+				ctx.ui.notify(`Could not inject cwd-change notice: ${msg}`, "warning");
+			}
+
 			const result = await ctx.switchSession(newSessionFile);
 			if (result.cancelled) {
 				ctx.ui.notify("Directory switch cancelled.", "warning");
