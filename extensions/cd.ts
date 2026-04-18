@@ -112,42 +112,51 @@ export default function cdExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Check whether the current session has any real conversation content.
+			// Fresh sessions from /new contain no "message" entries yet, and
+			// SessionManager.forkFrom refuses to fork an empty/invalid file. In that
+			// case we create a brand-new session at the target cwd instead of forking.
+			const hasContent = ctx.sessionManager.getEntries().some((e) => e.type === "message");
+
 			let newManager: SessionManager;
 			try {
-				newManager = SessionManager.forkFrom(sourceFile, target);
+				newManager = hasContent
+					? SessionManager.forkFrom(sourceFile, target)
+					: SessionManager.create(target);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Fork failed: ${msg}`, "error");
+				ctx.ui.notify(`Session switch failed: ${msg}`, "error");
 				return;
 			}
 
 			const newSessionFile = newManager.getSessionFile();
 			if (!newSessionFile) {
-				ctx.ui.notify("Fork returned a session with no file path.", "error");
+				ctx.ui.notify("New session has no file path.", "error");
 				return;
 			}
 
 			const rememberedPrevious = ctx.cwd;
 
-			// Inject an explicit, in-conversation notice so the LLM knows the cwd
-			// changed. Without this, the forked session inherits history that
-			// references the old cwd and the model keeps reasoning about the old
-			// directory when the user says "this folder".
-			try {
-				newManager.appendCustomMessageEntry(
-					"pi-cd-note",
-					[
-						`[pi-cd] Working directory changed: ${rememberedPrevious} → ${target}`,
-						"",
-						"From this point on, all relative paths, references to \"this folder\", \"the current directory\", \"here\", etc. refer to the NEW directory.",
-						"Earlier turns in this conversation happened in the previous directory; treat those as historical context only — do not assume their paths still apply.",
-					].join("\n"),
-					true,
-				);
-			} catch (err) {
-				// Non-fatal — switch still proceeds, just without the notice.
-				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Could not inject cwd-change notice: ${msg}`, "warning");
+			// Only inject the cwd-change notice when forking from a session that
+			// actually has history the LLM might reference. A fresh /new session has
+			// no prior context, so the notice would just be noise on turn 1.
+			if (hasContent) {
+				try {
+					newManager.appendCustomMessageEntry(
+						"pi-cd-note",
+						[
+							`[pi-cd] Working directory changed: ${rememberedPrevious} → ${target}`,
+							"",
+							'From this point on, all relative paths, references to "this folder", "the current directory", "here", etc. refer to the NEW directory.',
+							"Earlier turns in this conversation happened in the previous directory; treat those as historical context only — do not assume their paths still apply.",
+						].join("\n"),
+						true,
+					);
+				} catch (err) {
+					// Non-fatal — switch still proceeds, just without the notice.
+					const msg = err instanceof Error ? err.message : String(err);
+					ctx.ui.notify(`Could not inject cwd-change notice: ${msg}`, "warning");
+				}
 			}
 
 			const result = await ctx.switchSession(newSessionFile);
