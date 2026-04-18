@@ -137,11 +137,16 @@ export default function cdExtension(pi: ExtensionAPI) {
 
 			const rememberedPrevious = ctx.cwd;
 
-			// Only inject the cwd-change notice when forking from a session that
-			// actually has history the LLM might reference. A fresh /new session has
-			// no prior context, so the notice would just be noise on turn 1.
-			if (hasContent) {
-				try {
+			// Persistence:
+			//  - forkFrom path: append a visible cwd-change notice so the LLM knows
+			//    its prior context referred to a different dir. The append also
+			//    causes the new session file to be flushed to disk.
+			//  - create path: session file is not on disk until an entry is appended,
+			//    and ctx.switchSession silently no-ops on a missing file. Append a
+			//    pi-cd-init CustomEntry (extension-only, not in LLM context) to
+			//    force the file into existence before switching.
+			try {
+				if (hasContent) {
 					newManager.appendCustomMessageEntry(
 						"pi-cd-note",
 						[
@@ -152,11 +157,16 @@ export default function cdExtension(pi: ExtensionAPI) {
 						].join("\n"),
 						true,
 					);
-				} catch (err) {
-					// Non-fatal — switch still proceeds, just without the notice.
-					const msg = err instanceof Error ? err.message : String(err);
-					ctx.ui.notify(`Could not inject cwd-change notice: ${msg}`, "warning");
+				} else {
+					newManager.appendCustomEntry("pi-cd-init", {
+						target,
+						createdAt: new Date().toISOString(),
+					});
 				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				ctx.ui.notify(`Could not persist new session: ${msg}`, "error");
+				return;
 			}
 
 			const result = await ctx.switchSession(newSessionFile);
