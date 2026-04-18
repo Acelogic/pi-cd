@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	CURRENT_SESSION_VERSION,
 	SessionManager,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -112,60 +113,72 @@ export default function cdExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Check whether the current session has any real conversation content.
 			// Fresh sessions from /new contain no "message" entries yet, and
-			// SessionManager.forkFrom refuses to fork an empty/invalid file. In that
-			// case we create a brand-new session at the target cwd instead of forking.
+			// SessionManager.forkFrom refuses to fork an empty/invalid file.
 			const hasContent = ctx.sessionManager.getEntries().some((e) => e.type === "message");
 
-			let newManager: SessionManager;
-			try {
-				newManager = hasContent
-					? SessionManager.forkFrom(sourceFile, target)
-					: SessionManager.create(target);
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Session switch failed: ${msg}`, "error");
-				return;
-			}
-
-			const newSessionFile = newManager.getSessionFile();
-			if (!newSessionFile) {
-				ctx.ui.notify("New session has no file path.", "error");
-				return;
-			}
-
 			const rememberedPrevious = ctx.cwd;
+			let newSessionFile: string;
 
-			// Persistence:
-			//  - forkFrom path: append a visible cwd-change notice so the LLM knows
-			//    its prior context referred to a different dir. The append also
-			//    causes the new session file to be flushed to disk.
-			//  - create path: session file is not on disk until an entry is appended,
-			//    and ctx.switchSession silently no-ops on a missing file. Append a
-			//    pi-cd-init CustomEntry (extension-only, not in LLM context) to
-			//    force the file into existence before switching.
 			try {
 				if (hasContent) {
-					newManager.appendCustomMessageEntry(
-						"pi-cd-note",
-						[
-							`[pi-cd] Working directory changed: ${rememberedPrevious} → ${target}`,
-							"",
-							'From this point on, all relative paths, references to "this folder", "the current directory", "here", etc. refer to the NEW directory.',
-							"Earlier turns in this conversation happened in the previous directory; treat those as historical context only — do not assume their paths still apply.",
-						].join("\n"),
-						true,
-					);
+					// forkFrom writes the header + copied source entries directly to
+					// disk via appendFileSync, so the file exists immediately.
+					const forkedManager = SessionManager.forkFrom(sourceFile, target);
+					const file = forkedManager.getSessionFile();
+					if (!file) throw new Error("fork returned session with no file path");
+					newSessionFile = file;
+
+					// Inject a user-visible cwd-change note so the LLM doesn't keep
+					// reasoning about the old directory in subsequent turns. This
+					// append succeeds because forkFrom populates fileEntries with
+					// any assistant messages the source had, satisfying pi's
+					// _persist flush gate.
+					try {
+						forkedManager.appendCustomMessageEntry(
+							"pi-cd-note",
+							[
+								`[pi-cd] Working directory changed: ${rememberedPrevious} → ${target}`,
+								"",
+								'From this point on, all relative paths, references to "this folder", "the current directory", "here", etc. refer to the NEW directory.',
+								"Earlier turns in this conversation happened in the previous directory; treat those as historical context only — do not assume their paths still apply.",
+							].join("\n"),
+							true,
+						);
+					} catch {
+						// Non-fatal. Switch still proceeds without the notice.
+					}
 				} else {
-					newManager.appendCustomEntry("pi-cd-init", {
-						target,
-						createdAt: new Date().toISOString(),
-					});
+					// SessionManager.create returns a manager with a session_file
+					// PATH computed but NOT written to disk — pi's _persist method
+					// deliberately defers writes until an assistant message exists
+					// (to avoid littering disk with abandoned sessions). In our
+					// flow no assistant message ever arrives before we switch,
+					// so the file never gets written and ctx.switchSession then
+					// silently no-ops on a missing path. We write the session
+					// header ourselves, mimicking what forkFrom does, so the
+					// file exists on disk when switchSession opens it.
+					const tempManager = SessionManager.create(target);
+					const file = tempManager.getSessionFile();
+					const sessionId = tempManager.getSessionId();
+					if (!file || !sessionId) {
+						throw new Error("SessionManager.create returned no file path or id");
+					}
+					const dir = path.dirname(file);
+					if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+					const header = {
+						type: "session",
+						version: CURRENT_SESSION_VERSION,
+						id: sessionId,
+						timestamp: new Date().toISOString(),
+						cwd: target,
+					};
+					fs.writeFileSync(file, JSON.stringify(header) + "\n");
+					newSessionFile = file;
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Could not persist new session: ${msg}`, "error");
+				ctx.ui.notify(`Session creation failed: ${msg}`, "error");
 				return;
 			}
 
