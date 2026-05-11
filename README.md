@@ -1,6 +1,6 @@
 # pi-cd
 
-A [pi](https://github.com/mariozechner/pi-coding-agent) extension that adds a `/cd <path>` command for switching the session's working directory without leaving pi.
+A [pi](https://github.com/earendil-works/pi-coding-agent) extension that adds a `/cd <path>` command for switching the session's working directory without leaving pi.
 
 pi normally fixes `cwd` at session creation; built-in bash `cd` only affects subprocesses. This extension forks the current session into the target directory (via `SessionManager.forkFrom` + `ctx.switchSession`), so conversation history is preserved.
 
